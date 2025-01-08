@@ -1,0 +1,560 @@
+---
+title: "Understanding mitochondrial changes in hypoxic cell conditions"
+output:
+  html_document: 
+    df_print: kable
+    css: styles.css
+    highlight: tango
+    theme: yeti
+    fig_caption: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("C:/Users/Aditi/Documents/Desktop/R/DGE Analysis Main")
+```
+
+# Loading libraries
+
+```{r message=FALSE, warning=FALSE}
+library(DESeq2)
+library(ReactomePA)
+library(enrichplot)
+library(tidyverse)
+library(RColorBrewer)
+library(pheatmap)
+library(DEGreport)
+library(tximport)
+library(ggplot2)
+library(ggrepel)
+library(apeglm)
+library(reshape2)
+library(edgeR)
+library(AnnotationHub)
+library(ensembldb)
+library(pathview)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(conflicted)
+library(ensembldb)
+library(dplyr)
+###### ANNOTATION
+# Connect to AnnotationHub
+ah <- AnnotationHub()
+human_ens <- query(ah, c("Homo sapiens", "EnsDb"))
+human_ens
+human_ens <- human_ens[["AH116860"]]
+```
+
+# Inspecting the data
+
+First, load the raw counts data.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+#load data
+raw_counts <- read.table("./data/GSE132624/GSE132624_raw_counts.tsv", header = TRUE, sep = "\t", row.names = 1)
+View(raw_counts)
+tail(raw_counts)
+```
+
+```{r}
+# Create vectors for each column
+sample_id <- c(
+  paste0("GSM38823", 37:48),
+  paste0("GSM38823", 49:60),
+  paste0("GSM38823", 61:66),
+  paste0("GSM38823", c(67, 69)),  # Skip 68 for 24h
+  paste0("GSM38823", 70:72)
+)
+
+condition <- c(rep("501", 12), rep("IGR37", 12), rep("IGR39", 11))
+
+time <- c(
+  rep(c(0, 12, 24, 48), each = 3),  # For 501
+  rep(c(0, 12, 24, 48), each = 3),  # For IGR37
+  rep(c(0, 12), each = 3),          # For IGR39 (0h and 12h)
+  rep(24, 2),                       # For IGR39 (24h, only 2 reps)
+  rep(48, 3)                        # For IGR39 (48h)
+)
+
+replicate <- rep(c(1, 2, 3), length.out = length(sample_id))
+
+# Create the treatment column
+treatment <- ifelse(time == 0, "normoxia", "hypoxia")
+
+# Create the data frame
+meta <- data.frame(
+  condition = condition,
+  time = time,
+  replicate = replicate,
+  treatment = treatment,
+  row.names = sample_id
+)
+
+# Write the metadata to a CSV file
+write.csv(meta, file="./data/meta_132624.csv")
+# Display the full metadata
+print(meta)
+```
+
+Let's look at the distribution of raw counts in one of the samples.
+
+```{r message=FALSE, warning=FALSE}
+#distribution of counts in samples
+ggplot(raw_counts) +
+  geom_histogram(aes(x = GSM3882337), stat = "bin", bins = 200) +
+  xlim(-5,1000) +
+  xlab("Raw expression counts") +
+  ylab("Number of genes")
+```
+
+Filter genes with low counts (CPM) for higher DGE accuracy.
+
+```{r message=FALSE, warning=FALSE}
+  #Density Plot of the log-transformed Raw Count data 
+  df_log2<-log2(raw_counts)
+  df_log2_melted<-melt(df_log2)
+Raw_Count_Density_Plot <- ggplot(df_log2_melted, aes(x=value, fill=variable)) +
+    geom_density(alpha=.25) +
+    labs(x='Log2 Counts', y='Density', title='Raw Count Distribution (Before Filtering)') +
+    guides(fill = FALSE)  # Suppress the legend entirely
+
+Raw_Count_Density_Plot
+  
+  # Create a DGEList object
+  dge <- DGEList(counts = raw_counts)
+
+  # Calculate library sizes
+  dge$samples$lib.size <- colSums(dge$counts)
+  
+  # Calculate CPM
+  cpm_counts <- cpm(dge)
+  
+  #Plot CPM vs Raw Counts (Run the 3 commands together)
+  plot(cpm_counts[,1],raw_counts[,1],ylim=c(0,50),xlim=c(0,10),xlab="CPM", ylab="Raw Counts")
+  abline(v=1.9)
+  abline(h=10)
+  
+  # Set your CPM threshold (e.g., the value of CPM on the x axis which intersects with a Raw Count value of ~ 10)
+  cpm_threshold <- 1.9
+  
+  # Set the minimum number of samples that should meet the CPM threshold
+  min_samples <- 2
+  
+  # Create a logical matrix indicating which genes meet the CPM threshold in each sample
+  genes_to_keep <- rowSums(cpm_counts >= cpm_threshold) >= min_samples
+  
+  # Filter the raw counts matrix
+  counts_filtered <- raw_counts[genes_to_keep, ]
+
+  # Print some statistics
+  cat("Number of genes before filtering:", nrow(raw_counts), "\n")
+  cat("Number of genes after filtering:", nrow(counts_filtered), "\n")
+  cat("Percentage of genes retained:", round(nrow(counts_filtered) / nrow(raw_counts) * 100, 2), "%\n")
+  
+  # Write the filtered counts to a new file
+  # write.table(counts_filtered, "counts_filtered.txt", sep = "\t", quote = FALSE)
+  
+  #Plotting Sample Density Distributions after low count filtering
+  df_log2<-log2(counts_filtered)
+  df_log2_melted<-melt(df_log2)
+Filtered_Count_Density_Plot <- ggplot(df_log2_melted, aes(x=value, fill=variable)) +
+    geom_density(alpha=.25) +
+    labs(x='Log2 Intensity', y='Density', title='Raw Count Distribution (After Filtering)') +
+    guides(fill = FALSE)  # Suppress the legend entirely
+
+Filtered_Count_Density_Plot
+  
+# Save the density plot before filtering
+ggsave("Raw_Count_Density_Plot.png", plot = Raw_Count_Density_Plot, width = 8, height = 6, dpi = 300)
+
+# Save the density plot after filtering
+ggsave("Filtered_Count_Density_Plot.png", plot = Filtered_Count_Density_Plot, width = 8, height = 6, dpi = 300)
+
+```
+
+Next, lets look at mean vs. variance to inspect the data further.
+
+```{r message=FALSE, warning=FALSE}
+#mean vs variance
+mean_counts <- apply(counts_filtered[, 1:3], 1, mean)
+variance_counts <- apply(counts_filtered[, 1:3], 1, var)
+df <- data.frame(mean_counts, variance_counts)
+  
+ggplot(df) +
+  geom_point(aes(x=mean_counts, y=variance_counts)) + 
+  geom_line(aes(x=mean_counts, y=mean_counts, color="red")) +
+  scale_y_log10() +
+  scale_x_log10()
+mean_counts <- apply(counts_filtered[, 21:23], 1, mean)
+variance_counts <- apply(counts_filtered[, 21:23], 1, var)
+df <- data.frame(mean_counts, variance_counts)
+
+ggplot(df) +
+  geom_point(aes(x=mean_counts, y=variance_counts)) + 
+  geom_line(aes(x=mean_counts, y=mean_counts, color="red")) +
+  scale_y_log10() +
+  scale_x_log10()
+mean_counts <- apply(counts_filtered[, 33:35], 1, mean)
+variance_counts <- apply(counts_filtered[, 33:35], 1, var)
+df <- data.frame(mean_counts, variance_counts)
+
+ggplot(df) +
+  geom_point(aes(x=mean_counts, y=variance_counts)) + 
+  geom_line(aes(x=mean_counts, y=mean_counts, color="red")) +
+  scale_y_log10() +
+  scale_x_log10()
+```
+
+------------------------------------------------------------------------
+
+In all 3 cases, the mean ≠ variance and there is noticeable heteroscedasticity among genes with lower expression in all 3 groups. Additionally, variance \> mean for genes with high mean expression.
+
+Create the metadata file containing sample information.
+
+```{r}
+# Check that sample names match in both files
+all(colnames(counts_filtered) %in% rownames(meta))
+```
+
+Now, create the DESeq2 object with `raw_counts` and `meta` as inputs.
+
+```{r message=FALSE, warning=FALSE}
+# Create the DESeqDataSet
+meta$time <- factor(meta$time)
+dds <- DESeqDataSetFromMatrix(countData = counts_filtered, colData = meta, design = ~ condition + replicate + time)
+View(counts(dds))
+```
+
+We will generate a normalized counts table from dds to be used for data visualization before actually running differential gene expression analysis using DESeq2.
+
+```{r message = FALSE, warning = FALSE}
+dds <- estimateSizeFactors(dds)
+sizeFactors(dds)
+normalized_counts <- counts(dds, normalized=TRUE)
+write.table(normalized_counts, file="./data/normalized_counts_132624.txt", sep="\t", quote=F, col.names=NA)
+```
+
+Log transformation is applied on the normalized counts to perform dimensionality reduction (principal component analysis) and hierarchical clustering.
+
+```{r message=FALSE, warning=FALSE}
+vsd <- vst(dds, blind = T)
+
+pca_data <- plotPCA(vsd, intgroup = c("condition","time"), returnData = T)
+ggplot(pca_data, aes(PC1, PC2, color = group)) +
+  geom_point(size = 3) +
+  labs(x = paste0("PC1: ", round(100 * attr(pca_data, "percentVar")[1], 2), "%"),
+       y = paste0("PC2: ", round(100 * attr(pca_data, "percentVar")[2], 2), "%"),
+       title = "PCA Plot") +
+  theme_minimal()
+ntop <- 500
+expr_matrix <- assay(vsd)
+rv <- rowVars(expr_matrix)
+select <- order(rv, decreasing = TRUE)[seq_len(min(ntop, length(rv)))]
+expr_matrix_top <- expr_matrix[select, ]
+
+# Perform PCA on the top 500 genes
+pca<- prcomp(t(expr_matrix_top), center = TRUE, scale. = TRUE)
+
+# c5alculate variance and cumulative variance
+eigen_values <- tibble(
+  PC = factor(1:length(pca$sdev)),
+  var_pct = (pca$sdev^2 / sum(pca$sdev^2)) * 100,
+  cum_var = cumsum((pca$sdev^2 / sum(pca$sdev^2)) * 100)
+)
+
+# scree plot
+ggplot(eigen_values, aes(x = PC)) +
+  geom_col(aes(y = var_pct), fill = "skyblue") +
+  geom_line(aes(y = cum_var, group = 1), color = "red") +
+  geom_point(aes(y = cum_var), color = "red") +
+  labs(title = "Scree Plot: top 500", x = "Principal Components", y = "Variance Explained (%)") +
+  theme_minimal()
+
+write.table(expr_matrix, file="./data/expr_matrix_132624.txt", sep="\t", quote=F, col.names=NA)
+```
+
+Extract PC loadings.
+
+```{r message=FALSE, warning=FALSE}
+# Extract loadings for PC1
+pc1_loadings <- pca$rotation[, 1]
+pc2_loadings <- pca$rotation[, 2]
+
+# Sort genes by their PC1 loadings
+sorted_genes_1 <- sort(pc1_loadings, decreasing = TRUE)
+sorted_genes_2 <- sort(pc2_loadings, decreasing = TRUE)
+
+# Extract top 100 positive and negative genes
+top_100_positive_1 <- data.frame(head(sorted_genes_1, 100))
+top_100_negative_1 <- data.frame(tail(sorted_genes_1, 100))
+top_100_positive_2 <- data.frame(head(sorted_genes_2, 100))
+top_100_negative_2 <- data.frame(tail(sorted_genes_2, 100))
+
+pca_rawcounts_1 <- counts_filtered
+pca_rawcounts_1 <- rownames_to_column(pca_rawcounts_1, var = "entrezid")
+
+pca_rawcounts_2 <- counts_filtered
+pca_rawcounts_2 <- rownames_to_column(pca_rawcounts_2, var = "entrezid")
+
+annotations_ahb <- genes(human_ens, return.type = "data.frame") %>%
+  dplyr::select(gene_name, gene_id, entrezid, gene_biotype, description) %>%
+  dplyr::filter(entrezid %in% pca_rawcounts_1$entrezid) %>%
+  dplyr::distinct(entrezid, .keep_all = TRUE)
+
+annotations_ahb$entrezid <- as.character(unlist(annotations_ahb$entrezid))
+
+top_100_positive_1 <- rownames_to_column(top_100_positive_1, var = "entrezid")
+top_100_positive_1 <- left_join(top_100_positive_1, annotations_ahb, by = "entrezid")
+
+top_100_positive_2 <- rownames_to_column(top_100_positive_2, var = "entrezid")
+top_100_positive_2 <- left_join(top_100_positive_2, annotations_ahb, by = "entrezid")
+
+top_100_negative_1 <- rownames_to_column(top_100_negative_1, var = "entrezid")
+top_100_negative_1 <- left_join(top_100_negative_1, annotations_ahb, by = "entrezid")
+
+top_100_negative_2 <- rownames_to_column(top_100_negative_2, var = "entrezid")
+top_100_negative_2 <- left_join(top_100_negative_2, annotations_ahb, by = "entrezid")
+
+head(top_100_positive_1[, c("entrezid", "gene_name", "gene_biotype", "description")], n = 20)
+head(top_100_negative_1[, c("entrezid","gene_name", "gene_biotype", "description")], n = 20)
+head(top_100_positive_2[, c("entrezid", "gene_name", "gene_biotype", "description")], n = 20)
+head(top_100_negative_2[, c("entrezid","gene_name", "gene_biotype", "description")], n = 20)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Compute pairwise correlation values
+vsd_cor <- cor(expr_matrix)
+head(vsd_cor)
+# Plot heatmap
+plot1 <- pheatmap(vsd_cor, annotation = meta, angle_col = 45, show_colnames = F, show_rownames = F)
+ggsave("corr heat map.png", plot = plot1, width = 10, height = 8, dpi = 300)
+```
+
+# Likelihood Ratio Test
+
+```{r message=FALSE, warning=FALSE}
+#Likelihood ratio test
+dds_lrt <- DESeq(dds, test="LRT", reduced = ~ condition + replicate)
+# Extract results
+res_LRT <- results(dds_lrt)
+# Create a tibble for LRT results
+res_LRT_tb <- res_LRT %>%
+  data.frame() %>%
+  rownames_to_column(var="gene") %>% 
+  as_tibble()
+
+# Subset to return genes with padj < 0.01
+sigLRT_genes <- res_LRT_tb %>% 
+  dplyr::filter(padj < 0.01)
+
+# Obtain vst values for those significant genes
+cluster_vst <- expr_matrix[sigLRT_genes$gene, ]
+```
+
+```{r deg-patterns-plot, fig.width=16, fig.height=10, message = FALSE, warning = FALSE}
+clusters <- degPatterns(cluster_vst, metadata = meta, time = "time", col = "condition")
+ggsave("degPatterns_Plot.png", plot = clusters$plot, width = 20, height = 18, dpi = 300)
+```
+
+```{r message=FALSE, warning=FALSE}
+# Define the fix function
+fix <- function(x) {
+  x$gene <- rownames(x)
+  x$genes <- NULL
+  rownames(x) <- NULL
+  return(x)
+}
+rownames(clusters$df) <- sub("^X", "", rownames(clusters$df))
+# Initialize an empty list to store the groups
+group_list <- list()
+
+for (i in 1:45) {
+  group_list[[paste0("group", i)]] <- clusters$df %>%
+    dplyr::filter(cluster == i)
+    group_list[[paste0("group", i)]] <- fix(group_list[[paste0("group", i)]])
+}
+group_list <- group_list[sapply(group_list, function(x) nrow(x) > 0)]
+for (name in names(group_list)) {
+  cluster_num <- unique(group_list[[name]]$cluster)  # Get the cluster number
+  file_name <- paste0("cluster", cluster_num, ".csv")  # Create the correct file name
+  write.csv(group_list[[name]], file_name, row.names = FALSE)  # Save as CSV
+}
+```
+
+------------------------------------------------------------------------
+
+# Functional Analysis
+
+Annotation hub is used here to obtain gene information such as their entrez ids, their biotype, gene symboles, and enzembl ids. (e.g. protein coding, lncRNA, miRNA, etc.)
+
+```{r}
+# Initialize an empty list to store enrichment results
+enrichment_results <- list()
+
+# Loop through the group_list and perform pathway enrichment
+for (name in names(group_list)) {
+  genes <- group_list[[name]]$gene
+  cluster_num <- unique(group_list[[name]]$cluster)  # Get the actual cluster number
+
+  enrichment <- enrichPathway(gene = genes,
+                              organism = "human",
+                              pvalueCutoff = 0.01,
+                              pAdjustMethod = "BH",
+                              readable = TRUE)
+  
+  if (nrow(enrichment@result) > 0) {
+    enrichment_results[[paste0("cluster", cluster_num)]] <- enrichment
+    # Write the enrichment results to a CSV file using the correct cluster number
+    write.csv(enrichment@result, file = paste0("enrichment_results_cluster", cluster_num, ".csv"), row.names = FALSE)
+  }
+}
+
+# Create dotplots for each cluster with significant results
+for (name in names(enrichment_results)) {
+  if (length(enrichment_results[[name]]) > 0 && nrow(enrichment_results[[name]]@result) > 0) {
+    # Filter for significant results
+    significant_results <- enrichment_results[[name]]@result %>% 
+      filter(p.adjust < 0.01)
+    
+    if (nrow(significant_results) > 0) {
+      p <- dotplot(enrichment_results[[name]], showCategory = 12, label_format = 70) +
+        ggtitle(paste("Enrichment Dotplot for", name))
+      
+      # Save dotplot for the corresponding cluster
+      ggsave(paste0("enrichment_dotplot_", name, ".png"), plot = p, width = 12, height = 7, dpi = 300)
+    } else {
+      message(paste("No significant pathways (p.adjust < 0.01) found for", name))
+    }
+  } else {
+    message(paste("No enrichment results found for", name))
+  }
+}
+
+# Create a combined dotplot for all clusters
+all_results <- do.call(rbind, lapply(names(enrichment_results), function(name) {
+  result <- enrichment_results[[name]]@result
+  if (nrow(result) > 0) {
+    significant_results <- result %>% filter(p.adjust < 0.01)
+    if (nrow(significant_results) > 0) {
+      significant_results$Cluster <- name  # Use the actual cluster name
+      return(significant_results)
+    }
+  }
+  return(NULL)
+}))
+
+# If significant pathways exist, create a combined dotplot
+if (!is.null(all_results) && nrow(all_results) > 0) {
+  all_results <- all_results[order(all_results$p.adjust), ]
+  top_pathways <- all_results %>%
+    group_by(Cluster) %>%
+    slice_head(n = 5) %>%
+    ungroup()
+
+  p_combined <- ggplot(top_pathways, aes(x = Cluster, y = Description, size = Count, color = p.adjust)) +
+    geom_point() +
+    scale_color_gradient(low = "red", high = "blue") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(x = "Cluster", y = "Pathway", size = "Gene Count", color = "Adjusted p-value") +
+    ggtitle("Top 5 Enriched Pathways Across All Clusters")
+
+  ggsave("combined_enrichment_dotplot.png", plot = p_combined, width = 20, height = 12, dpi = 300)
+} else {
+  message("No significant enrichment results (p.adjust < 0.01) found across all clusters")
+}
+```
+
+# Subset Mitochondrial genes
+
+Repeat the same process for a subset of genes corresponding to mitochondria from the significant genes obtained from the Likelihood Ratio Test.
+
+```{r deg-patterns-mit, fig.width=16, fig.height=10, message = FALSE, warning = FALSE}
+#subset mitochondrial genes
+mito_genes <- read.table("C:/Users/Aditi/Documents/Desktop/R/DGE Analysis Main/data/HumanMitoCarta.txt", header = TRUE, sep = "\t")
+entrez_ids <- mito_genes$HumanGeneID
+sigLRT_genes_mit <- sigLRT_genes %>% filter(sigLRT_genes$gene %in% entrez_ids)
+
+cluster_vst <- expr_matrix[sigLRT_genes_mit$gene, ]
+clusters <- degPatterns(cluster_vst, metadata = meta, time = "time", col = "condition")
+# Save the plot generated by degPatterns
+ggsave("degPatterns_Plot_mit.png", plot = clusters$plot, width = 20, height = 18, dpi = 300)
+
+# Define the fix function
+fix <- function(x) {
+  x$gene <- rownames(x)
+  x$genes <- NULL
+  rownames(x) <- NULL
+  return(x)
+}
+rownames(clusters$df) <- sub("^X", "", rownames(clusters$df))
+# Initialize an empty list to store the groups
+group_list <- list()
+
+for (i in 1:45) {
+  group_list[[paste0("group", i)]] <- clusters$df %>%
+    dplyr::filter(cluster == i)
+    group_list[[paste0("group", i)]] <- fix(group_list[[paste0("group", i)]])
+}
+group_list <- group_list[sapply(group_list, function(x) nrow(x) > 0)]
+for (name in names(group_list)) {
+  cluster_num <- unique(group_list[[name]]$cluster)  # Get the cluster number
+  file_name <- paste0("cluster_mit", cluster_num, ".csv")  # Create the correct file name
+  write.csv(group_list[[name]], file_name, row.names = FALSE)  # Save as CSV
+}
+# Initialize an empty list to store enrichment results
+enrichment_results <- list()
+
+# Perform pathway enrichment and save results
+for (name in names(group_list)) {
+  genes <- group_list[[name]]$gene
+  cluster_num <- unique(group_list[[name]]$cluster)  # Get actual cluster number
+
+  enrichment <- enrichPathway(gene = genes,
+                              organism = "human",
+                              pvalueCutoff = 0.01,
+                              pAdjustMethod = "BH",
+                              readable = TRUE)
+
+  if (nrow(enrichment@result) > 0) {
+    enrichment_results[[paste0("cluster", cluster_num)]] <- enrichment
+    write.csv(enrichment@result, file = paste0("enrichment_results_cluster", cluster_num, ".csv"), row.names = FALSE)
+  }
+}
+
+# Create dotplots for each cluster
+for (name in names(enrichment_results)) {
+  significant_results <- enrichment_results[[name]]@result %>% filter(p.adjust < 0.01)
+  
+  if (nrow(significant_results) > 0) {
+    p <- dotplot(enrichment_results[[name]], showCategory = 12, label_format = 70) +
+         ggtitle(paste("Enrichment Dotplot for", name))
+    ggsave(paste0("enrichment_dotplot_", name, ".png"), plot = p, width = 12, height = 7, dpi = 300)
+  } else {
+    message(paste("No significant pathways (p.adjust < 0.01) found for", name))
+  }
+}
+
+# Create a combined dotplot for all clusters
+all_results <- do.call(rbind, lapply(names(enrichment_results), function(name) {
+  enrichment_results[[name]]@result %>% filter(p.adjust < 0.01) %>% 
+    mutate(Cluster = name)
+}))
+
+if (!is.null(all_results) && nrow(all_results) > 0) {
+  top_pathways <- all_results %>% group_by(Cluster) %>% slice_head(n = 5)
+
+  p_combined <- ggplot(top_pathways, aes(x = Cluster, y = Description, size = Count, color = p.adjust)) +
+                geom_point() +
+                scale_color_gradient(low = "red", high = "blue") +
+                theme_minimal() +
+                theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+                labs(x = "Cluster", y = "Pathway", size = "Gene Count", color = "Adjusted p-value") +
+                ggtitle("Top 5 Enriched Pathways Across All Clusters")
+
+  ggsave("combined_enrichment_dotplot.png", plot = p_combined, width = 20, height = 12, dpi = 300)
+} else {
+  message("No significant enrichment results (p.adjust < 0.01) found across all clusters")
+}
+```
